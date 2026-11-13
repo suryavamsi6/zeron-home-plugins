@@ -1,0 +1,21 @@
+{
+  "id": "home-greeting",
+  "name": "Home greeting",
+  "version": "0.1.0",
+  "description": "A time-of-day greeting with your name on a new chat's screen, like Claude Code desktop.",
+  "entry": "init.luau",
+  "permissions": [
+    "ui.add",
+    "profile.read"
+  ],
+  "signature": {
+    "key": "g5EOjlJ6MlKLPC_yUyYYVztBTUyCqyL2GM4-U1blDRs",
+    "files": {
+      "README.md": "2d5371357e62782b4c93fb3d444532c2b4eaff67becddb8ed18f80a77694cad0",
+      "init.luau": "7392aaf637b598c404d65efa210680f4ad13f3a58a13dfe0fc886d67d9bdd819",
+      "locales/en.json": "16543faba9e1f9fb837d83d6aa9459508f7795e288eca4bc7dd94ae3aed786f1",
+      "zeron.luau": "0ef4194bdf34ac0f30315e783972fdc82c05d4269f22d885e15cb59430cb2cd7"
+    },
+    "sig": "YuMXGkx154l6w4bNaF20Qk0G7-4ZfNm6a2qWCOiMfM8gXlOqVVMnS1LBfLR-yWkX_QgXDt70c2laDltM2QedAw"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "id": "home-activity",
+  "name": "Home activity",
+  "version": "0.1.0",
+  "description": "Recent GitHub account events and Zeron chats on the new chat screen.",
+  "entry": "init.luau",
+  "permissions": [
+    "ui.add",
+    "sessions.read",
+    "navigate",
+    "links.open",
+    "commands"
+  ],
+  "commands": [
+    "gh"
+  ],
+  "signature": {
+    "key": "g5EOjlJ6MlKLPC_yUyYYVztBTUyCqyL2GM4-U1blDRs",
+    "files": {
+      "README.md": "cde115ed254b16c3cad2f8847923f83d9d78cf24aa6dcdfd056fc4a4d1a642a5",
+      "init.luau": "1ff21ed082ec6dc9cf1e50fea7be0687418b7c3a3a5db095e4dd801d67b9101f",
+      "locales/en.json": "05875e8ab886007c0e6674188dff97ff7d8d782bc057dca84e5757eafa3e98b8",
+      "zeron.luau": "0ef4194bdf34ac0f30315e783972fdc82c05d4269f22d885e15cb59430cb2cd7"
+    },
+    "sig": "5krXfKYRNKujb_NXKoOp0_u8F5XUdBpKhpRM6fTY99_Fi6-jVSrz9a4s7fBzZNJPR1JTp2SOif47zaxjERZjCA"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "commit-graph",
+  "name": "Commit graph",
+  "version": "0.1.0",
+  "description": "A year of the checkout's commits as a calendar of squares under the composer, deeper violet the busier the day.",
+  "icon": "icon.svg",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": [
+    "ui.add",
+    "sessions.read",
+    "files.read",
+    "service",
+    "commands"
+  ],
+  "commands": [
+    "git"
+  ],
+  "settings": [
+    {
+      "id": "show",
+      "kind": "switch",
+      "label": "Show the graph",
+      "description": "The recent commits' graph under each chat's composer.",
+      "default": true
+    },
+    {
+      "id": "all_branches",
+      "kind": "switch",
+      "label": "All branches",
+      "description": "Draw every branch, remote and tag, not just this branch, its upstream and base.",
+      "default": false
+    }
+  ],
+  "signature": {
+    "key": "g5EOjlJ6MlKLPC_yUyYYVztBTUyCqyL2GM4-U1blDRs",
+    "files": {
+      "README.md": "4bc030b50367064b67dc830f82ff21af642c15bb765bcef70d47a2c2e714c328",
+      "icon.svg": "a5c167f83d2f8d9f5d41c3772b0ced453289195d915dad2308cb32898f6068e7",
+      "init.luau": "e363d770f69279039e94904f4745ca8cf0f8f379bf31af5c31e9f43188940fbb",
+      "locales/en.json": "e7e7ca6d14558f47f85f8d73be195aec446bf8d98c32d10936c28002b9318b70",
+      "service.luau": "830693039f2e1cb5efbe8ac98675e9dc83a06d081a6bdbffcb12e254137fe22f",
+      "zeron.luau": "0ef4194bdf34ac0f30315e783972fdc82c05d4269f22d885e15cb59430cb2cd7"
+    },
+    "sig": "u0iimgIdVAMd-qPJQpLse7njb6wToLvYtuSZsS0vEQ3fsgTcQKfJ9kJwpbPLn9YTu4mI5gO9MNoeUslTdqHcBA"
+  }
+}
