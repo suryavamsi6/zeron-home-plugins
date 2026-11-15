@@ -1,0 +1,17 @@
+{
+  "id": "pi-tps",
+  "name": "Pi tokens per second",
+  "version": "0.1.0",
+  "entry": "init.luau",
+  "permissions": [
+    "ui.add",
+    "sessions.read",
+    "commands"
+  ],
+  "commands": [
+    "find",
+    "tail",
+    "jq"
+  ],
+  "description": "The rate of pi's last finished reply in this chat: its output tokens over the milliseconds it took, beside the context ring."
+}
