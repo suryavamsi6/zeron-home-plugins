@@ -1,7 +1,7 @@
 {
   "id": "pi-tps",
   "name": "Pi tokens per second",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "entry": "init.luau",
   "permissions": [
     "ui.add",
@@ -13,5 +13,5 @@
     "tail",
     "jq"
   ],
-  "description": "The rate of pi's last finished reply in this chat: its output tokens over the milliseconds it took, beside the context ring."
+  "description": "How fast pi's model is writing in this chat: live while it streams, then pi's own figure for the reply, beside the context ring."
 }
