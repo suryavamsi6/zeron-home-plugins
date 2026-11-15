@@ -2,7 +2,7 @@
 
 A chip in the composer's toolbar, beside the context ring: how fast pi's model is writing in this chat.
 
-It counts up live while pi writes — `~62 tok/s` — and when the reply lands it settles on pi's own figure for it: `58.3 tok/s`, the output tokens pi reported over the milliseconds the reply took. Switch to another chat and it shows that chat's last reply.
+While Pi writes, the chip shows an estimate such as `~62 tok/s`. After each assistant response, it shows the reported output tokens divided by the response duration, such as `58.3 tok/s`. Switch chats to see that chat's last completed response.
 
 ## Where the numbers come from
 
@@ -11,31 +11,44 @@ It counts up live while pi writes — `~62 tok/s` — and when the reply lands i
 | `~/.zeron/orgs/*/user_*/journals/<chat>.jsonl` | every fragment as pi writes it, and the session this chat runs in |
 | `~/.pi/agent/sessions/**/<day>_<session>.jsonl` | each finished reply: `usage.output` and `durationMs` |
 
-**Live.** Zeron fills the chat's journal as pi streams: each reasoning and text fragment is one line. The chip reads what the journal gained since it last looked, and divides it by the time it took. The journal only grows while the model writes, so an idle read finds nothing and costs nothing — no turn events to miss, nothing to poll while it's quiet.
+**Live estimate.** The plugin decodes `textDelta` and `reasoningDelta` journal events and counts Unicode characters, not JSON escapes or UTF-8 bytes. Character growth over the sampling window is divided by the estimated characters per output token.
 
-Characters are not tokens, so it needs a ratio. It starts at the four pi's own terminal assumes, then measures this chat's own: every reply ends with a `usage` line carrying the tokens pi counted for it, and the characters written since the last such line, over those tokens, is what this chat really writes per token. It takes the median of the last eight — and only once three replies agree, since one reply's ratio is no median.
+The ratio starts at 4. Each complete response contributes its characters divided by its reported output tokens, provided it contains more than 200 characters and 60 output tokens. After three qualifying responses, the plugin uses the median of the last eight ratios, bounded to 1.5–8. Responses only partly observed after attaching or skipping an oversized read do not calibrate the ratio. Multiple response boundaries in one read are handled separately.
 
-That measurement matters because pi's output tokens include thinking the journal never records — a reply that reasons hard writes far fewer visible characters than its token count suggests. Left at four, the live figure read up to 50% low on this chat; measured, it settles around 2.2.
+This remains approximate. Hidden reasoning and tool arguments may contribute output tokens without visible characters. Their proportions, the language, and the model can change between responses. The `~` is never removed from a live estimate.
 
-**Exact.** When the reply finishes, pi's session file has the reply's `usage.output` and `durationMs`. The journal's `sessionStarted` names the session and the harness running it; for a pi chat that id finds the session file, and its last reply is the number the chip settles on. A chat run by another harness has no pi session, so the chip stays empty there.
+**Completed response.** The last assistant message in Pi's session file provides `usage.output` and `durationMs`. The calculation is `usage.output / (durationMs / 1000)`. Reasoning tokens are already included in `output`, so they are not added again. This is per assistant response, not an average across a tool-using turn.
+
+The journal's `sessionStarted` event identifies the harness and Pi session file. Chats using another harness have no Pi rate.
 
 ## Details worth knowing
 
-- Only a fragment's `text` is counted, never the JSON around it. A fragment is ~13 characters of reply inside ~86 bytes of line — counting the line would overstate the rate about five times.
-- Only whole lines count. The last line of a read may still be arriving, so it waits for the next one.
-- The live figure covers a 3-second window, and only appears once there's 0.7 s of stream to divide by. A window older than that is a pause, not a slow model, so no figure is shown.
-- Reading the journal costs a process, so a chat that has been quiet is read less and less often (at most one tick in sixteen). A turn starting, or text arriving, puts it back to every tick.
-- A live figure is marked `~` (an estimate, as a terminal marks one) and withdrawn after 1.5 s without new text rather than frozen at a stale number.
-- `durationMs` runs from the request to the end of the response, so the exact figure includes time to first token. That's why it reads a little under the live one.
+- Only decoded text and reasoning fragments count. Tool results, user messages, and JSON metadata do not.
+- Only complete JSONL records are consumed. An unfinished last record is retried on the next read.
+- The live window covers up to 3 seconds and needs at least 0.7 seconds between samples. Each usage event clears the previous response's samples.
+- Journal reads run every 300 ms while active, backing off to one read every 17 ticks when quiet. Starting a turn wakes the sampler. Completed-rate reads run every 2 seconds.
+- Live estimates expire after 1.5 seconds without new text. Polling an older completed response does not overwrite a live estimate.
+- `durationMs` includes time to first token. The completed rate is therefore an end-to-end response rate, not decode-only throughput.
+- Async reads from a chat switched away from cannot update the new chat's state.
 
 ## Permissions
 
 - `ui.add` — the chip in the composer's toolbar.
 - `sessions.read` — which chat is on screen.
-- `commands` — `find` and `tail`, to locate and read those two files.
+- `commands` — `find`, `jq`, and `tail`, to locate and read those two files.
 
 It reads; it never writes.
 
 ## Build
 
-`init.luau` is the plugin, `zeron.luau` Zeron's helpers, `zeron-plugin.json` its manifest. Save any file and Zeron re-signs and reloads it. Where plugins can place nodes: `/home/surya/.zeron/docs/plugins.md`.
+`init.luau` is the plugin, `zeron.luau` Zeron's helpers, `zeron-plugin.json` its manifest. Save files in the installed plugin folder and Zeron re-signs and reloads them. Plugin authoring documentation is at `/home/surya/.zeron/docs/plugins.md`.
+
+## Tests
+
+Run the production rate logic with mocked Zeron I/O in the official Luau CLI. Python 3 supplies decoded JSON fixtures; the plugin has no new runtime dependencies.
+
+```sh
+python3 pi-tps/tests/test_rates.py /path/to/luau
+```
+
+The regressions cover calibration, escaped and Unicode text, response boundaries, partial reads, stale callbacks, completed-rate arithmetic, and live estimate expiry.
