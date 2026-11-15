@@ -1,23 +1,9 @@
--- Pi tokens per second: how fast pi's model is writing, in this chat.
---
--- One chip in the composer's toolbar, beside the context ring. While pi
--- writes it counts up live ("~62 tok/s"); once the reply is done it shows
--- pi's own figure for it ("58.3 tok/s"): the output tokens pi reported over
--- the milliseconds it took.
---
--- Live, from the chat's journal
---   ~/.zeron/orgs/*/user_*/journals/<chat>.jsonl
--- which Zeron fills as pi streams — every reasoning and text fragment is a
--- line there. The chip reads only what was added since it last looked and
--- turns those characters into tokens the way pi's own terminal does (four
--- characters to a token), so the two figures agree while it writes.
---
--- Exact, from pi's session file for this chat
---   ~/.pi/agent/sessions/**/<day>_<session>.jsonl
--- where each finished reply is one line with `usage.output` and
--- `durationMs`. The journal's sessionStarted names that session, and the
--- harness running it: another harness has no pi session, so the chip stays
--- empty there.
+-- Pi tokens per second for the chat on screen.
+-- Live is an estimate from decoded text and reasoning characters over a
+-- rolling window, calibrated against completed responses when possible.
+-- It cannot see every generated token, including hidden reasoning and tool
+-- arguments. A finished response uses usage.output / (durationMs / 1000),
+-- including startup latency. Reasoning tokens are already part of output.
 
 local zeron = require("./zeron")("pi-tps")
 
@@ -31,19 +17,20 @@ local RATIO_SPAN = 8 -- replies to measure it over
 local MIN_RATIO = 1.5 -- a reply this thin says nothing about the next one
 local MAX_RATIO = 8
 local MIN_SAMPLES = 3 -- replies to see before the default is set aside
-local MAX_READ = 200000 -- a bigger jump than this is a new turn, not a burst
-local MAX_IDLE = 16 -- a quiet chat is read 1 tick in this many, at most
+local MAX_READ = 200000 -- skip oversized reads without calibrating a partial response
+local MAX_IDLE = 16 -- back off to one read every 17 ticks
 
 -- What's been learned about the chat on screen, kept outside the build so a
 -- rebuild doesn't lose it.
 local W = {
+	generation = 0,
 	chat = nil :: string?,
 	journal = nil :: string?,
 	file = nil :: string?,
 	rate = nil :: number?, -- pi's own figure for the last finished reply
 	live = nil :: number?, -- the estimate while it writes
 	liveAt = 0,
-	units = 0, -- characters of the reply read so far this turn
+	units = 0, -- decoded characters in the current response
 	off = nil :: number?, -- the journal's next byte to read
 	samples = {} :: { { t: number, u: number } },
 	ticks = 0, -- ticks seen, to read a quiet journal less often
@@ -54,6 +41,7 @@ local W = {
 	ratio = CHARS_PER_TOKEN,
 	-- Characters written since the last usage line, for the next reading.
 	round = 0,
+	complete = false, -- false when we attached or skipped bytes mid-response
 	busy = { journal = false, rate = false, live = false },
 	-- Told when the figure changes, so the chip shows it at once. Set by the
 	-- place's build.
@@ -72,141 +60,143 @@ local function trim(s: string): string?
 end
 
 local function reset(chat: string?)
+	W.generation += 1
+	W.busy = { journal = false, rate = false, live = false }
 	W.chat = chat
 	W.journal = nil
 	W.file = nil
 	W.rate = nil
 	W.live = nil
 	W.off = nil
+	W.liveAt = 0
+	W.ticks = 0
 	W.units = 0
 	W.samples = {}
 	W.idle = 0
 	W.ratios = {}
 	W.ratio = CHARS_PER_TOKEN
 	W.round = 0
+	W.complete = false
 	show()
 end
 
--- The rate of pi's last finished reply. Reads only the file's end: a long
--- session's file is read from its tail, never whole. The lines are parsed
--- here rather than piped through jq: a few hundred KB down a pipe is a lot
--- to hand a promise, and one that stalls would keep the figure stale for
--- good.
+-- Read the last completed assistant response, not user text or tool output.
+-- Updating this fallback must not hide a newer response's live estimate.
 local function read_rate()
 	if W.busy.rate or W.file == nil then
 		return
 	end
-	W.busy.rate = true
-	-- The last reply can sit well back from the end once tool results have
-	-- been written after it, so read a generous tail: it is still small.
+	local generation, busy = W.generation, W.busy
+	busy.rate = true
 	zeron.run("tail", { "-n", "400", W.file }):after(function(t: any)
-		W.busy.rate = false
-		if t.status ~= 0 then
+		busy.rate = false
+		if generation ~= W.generation or t.status ~= 0 then
 			return
 		end
-		-- The last reply pi reported both numbers for.
 		local found = nil
 		for line in string.gmatch(tostring(t.stdout), "[^\n]+") do
-			local out = string.match(line, '"usage":{[^}]-"output":%s*(%d+)')
-			local dur = string.match(line, '"durationMs":%s*(%d+)')
-			if out ~= nil and dur ~= nil then
-				local o, d = tonumber(out), tonumber(dur)
-				if o ~= nil and d ~= nil and o > 0 and d > 0 then
-					found = o / (d / 1000)
+			local ok, entry = pcall(ui.json.decode, line)
+			if ok and type(entry) == "table" and entry.type == "message" then
+				local message = entry.message
+				if type(message) == "table" and message.role == "assistant" and type(message.usage) == "table" then
+					local out, duration = message.usage.output, message.durationMs
+					if type(out) == "number" and type(duration) == "number" and out > 0 and duration > 0 then
+						found = out / (duration / 1000)
+					end
 				end
 			end
 		end
-		if found == nil then
-			return
+		if found ~= nil then
+			W.rate = found
+			show()
 		end
-		W.rate = found
-		-- pi's own figure for this reply replaces the estimate.
-		W.live = nil
-		show()
 	end, function()
-		W.busy.rate = false
+		busy.rate = false
 	end)
 end
 
--- This chat's journal, then the pi session it names (and whether it's pi's).
+-- Publish the journal only after its starting offset is known. Every async
+-- callback belongs to the chat generation that started the lookup.
 local function find_session(chat: string)
 	if W.busy.journal then
 		return
 	end
-	W.busy.journal = true
+	local generation, busy = W.generation, W.busy
+	busy.journal = true
+	local function failed()
+		busy.journal = false
+	end
 	zeron.run("find", { ".zeron/orgs", "-name", `{chat}.jsonl`, "-print", "-quit" }):after(function(r: any)
+		if generation ~= W.generation then return end
 		local path = if r.status == 0 then trim(tostring(r.stdout)) else nil
-		if path == nil then
-			W.busy.journal = false
-			return
-		end
+		if path == nil then failed(); return end
 		zeron.run("jq", { "-r", 'select(.event.type == "sessionStarted") | "\\(.event.harness) \\(.event.sessionId)"', path }):after(function(h: any)
+			if generation ~= W.generation then return end
 			local harness, sid = nil, nil
 			for line in string.gmatch(tostring(h.stdout), "[^\n]+") do
 				harness, sid = string.match(line, "^(%S+) (%S+)$")
 			end
-			if harness ~= "pi" or sid == nil then
-				W.busy.journal = false
-				return
-			end
+			if h.status ~= 0 or harness ~= "pi" or sid == nil then failed(); return end
 			zeron.run("find", { ".pi/agent/sessions", "-name", `*{sid}.jsonl`, "-print", "-quit" }):after(function(f: any)
-				W.busy.journal = false
-				W.journal = path
-				W.file = if f.status == 0 then trim(tostring(f.stdout)) else nil
-				-- Start reading from where the journal stands: what's there
-				-- already is finished business.
+				if generation ~= W.generation then return end
+				local file = if f.status == 0 then trim(tostring(f.stdout)) else nil
 				zeron.run("find", { path, "-printf", "%s" }):after(function(s: any)
+					failed()
+					if generation ~= W.generation or s.status ~= 0 then return end
 					local size = tonumber(string.match(tostring(s.stdout), "^%s*(%d+)"))
-					if size ~= nil then
-						W.off = size + 1
-					end
-				end)
-				read_rate()
-			end, function()
-				W.busy.journal = false
-			end)
-		end, function()
-			W.busy.journal = false
-		end)
-	end, function()
-		W.busy.journal = false
-	end)
+					if size == nil then return end
+					W.journal, W.file, W.off = path, file, size + 1
+					W.complete = false
+					read_rate()
+				end, failed)
+			end, failed)
+		end, failed)
+	end, failed)
 end
 
--- How much new reply a chunk of the journal holds, in characters of the
--- reply itself.
---
--- Only a fragment's `text` counts, never its JSON: a fragment is ~13
--- characters of reply inside ~86 bytes of line, and counting the line would
--- overstate the rate about five times over.
--- Only whole lines count: the last one may still be arriving.
-local function count(chunk: string): (number, number, number?)
-	local units = 0
-	local tokens = nil
+-- Keep usage boundaries in order, including zero-token completions. Only
+-- complete JSONL records are consumed; a partial last record is read again.
+local function count(chunk: string): ({ { units: number?, tokens: number? } }, number)
+	local events = {}
 	local start = 1
 	while true do
 		local nl = string.find(chunk, "\n", start, true)
-		if nl == nil then
-			break
-		end
+		if nl == nil then break end
 		local line = string.sub(chunk, start, nl - 1)
 		start = nl + 1
-		-- A reasoning or text fragment, as written.
-		if string.find(line, 'Delta"', 1, true) ~= nil then
-			local text = string.match(line, '^.*"text":"(.*)"}}$')
-			if text ~= nil then
-				units += string.len(text)
-			end
-		else
-			-- A reply's own usage: the tokens pi counted for what was just
-			-- written, against the characters seen since the last one.
-			local out = tonumber(string.match(line, '"outputTokens":%s*(%d+)'))
-			if out ~= nil and out > 0 then
-				tokens = out
+		local ok, record = pcall(ui.json.decode, line)
+		local event = if ok and type(record) == "table" then record.event else nil
+		if type(event) == "table" then
+			if (event.type == "textDelta" or event.type == "reasoningDelta") and type(event.text) == "string" then
+				table.insert(events, { units = utf8.len(event.text) or #event.text })
+			elseif event.type == "usage" and type(event.outputTokens) == "number" and event.outputTokens >= 0 then
+				table.insert(events, { tokens = event.outputTokens })
 			end
 		end
 	end
-	return units, start - 1, tokens
+	return events, start - 1
+end
+
+local function clear_stream()
+	W.round, W.units = 0, 0
+	W.samples = {}
+	W.live = nil
+end
+
+local function finish_response(tokens: number)
+	if W.complete and W.round > 200 and tokens > 60 then
+		table.insert(W.ratios, W.round / tokens)
+		while #W.ratios > RATIO_SPAN do table.remove(W.ratios, 1) end
+		if #W.ratios >= MIN_SAMPLES then
+			local sorted = table.clone(W.ratios)
+			table.sort(sorted)
+			local mid = math.floor((#sorted + 1) / 2)
+			local median = if #sorted % 2 == 1 then sorted[mid] else (sorted[mid] + sorted[mid + 1]) / 2
+			W.ratio = math.clamp(median, MIN_RATIO, MAX_RATIO)
+		end
+	end
+	clear_stream()
+	W.complete = true
 end
 
 -- The live figure: characters read over the last few seconds, as tokens.
@@ -225,7 +215,7 @@ local function live_rate(now: number): number?
 	if grew <= 0 then
 		return nil
 	end
-	local rate = (grew / (span / 1000)) / CHARS_PER_TOKEN
+	local rate = (grew / (span / 1000)) / W.ratio
 	if rate <= 0 or rate > 2000 then
 		return nil
 	end
@@ -251,66 +241,48 @@ local function sample_live()
 	if W.busy.live or W.journal == nil or W.off == nil then
 		return
 	end
-	W.busy.live = true
+	local generation, busy = W.generation, W.busy
+	busy.live = true
 	zeron.run("tail", { "-c", `+{W.off}`, W.journal }):after(function(t: any)
-		W.busy.live = false
-		if t.status ~= 0 then
-			return
-		end
+		busy.live = false
+		if generation ~= W.generation or t.status ~= 0 then return end
 		local body = tostring(t.stdout)
 		if #body > MAX_READ then
-			-- A new turn's worth, not a burst: start counting from here.
 			W.off += #body
-			W.units = 0
-			W.samples = {}
+			clear_stream()
+			W.complete = false
+			show()
 			return
 		end
-		local units, used, tokens = count(body)
+		local events, used = count(body)
 		W.off += used
-		W.round += units
-		if tokens ~= nil then
-			-- What this reply wrote per token pi counted for it. Thinking the
-			-- journal never sees counts toward pi's tokens, so a chat that
-			-- thinks hard runs below four; measure rather than assume.
-			if W.round > 200 and tokens > 60 then
-				-- One reply is one reply: its own ratio is no median. Until a
-				-- few agree, four characters a token stands.
-				table.insert(W.ratios, W.round / tokens)
-				while #W.ratios > RATIO_SPAN do
-					table.remove(W.ratios, 1)
-				end
-				local sorted = {}
-				for i, v in ipairs(W.ratios) do
-					sorted[i] = v
-				end
-				table.sort(sorted)
-				local mid = math.floor((#sorted + 1) / 2)
-				if #sorted >= MIN_SAMPLES then
-					local median = if #sorted % 2 == 1 then sorted[mid] else (sorted[mid] + sorted[mid + 1]) / 2
-					W.ratio = math.clamp(median, MIN_RATIO, MAX_RATIO)
-				end
+		local units = 0
+		for _, event in ipairs(events) do
+			if event.tokens ~= nil then
+				finish_response(event.tokens)
+				units = 0
+			elseif event.units ~= nil then
+				W.round += event.units
+				W.units += event.units
+				units += event.units
 			end
-			W.round = 0
 		end
 		if units == 0 then
 			W.idle = math.min(W.idle + 1, MAX_IDLE)
+			if #events > 0 then show() end
 			return
 		end
 		W.idle = 0
-		W.units += units
 		local now = ui.now()
 		table.insert(W.samples, { t = now, u = W.units })
 		while #W.samples > 1 and W.samples[1].t <= now - WINDOW_MS do
 			table.remove(W.samples, 1)
 		end
-		local rate = live_rate(now)
-		if rate ~= nil then
-			W.live = rate
-			W.liveAt = now
-			show()
-		end
+		W.live = live_rate(now)
+		W.liveAt = now
+		show()
 	end, function()
-		W.busy.live = false
+		busy.live = false
 	end)
 end
 
@@ -370,7 +342,7 @@ zeron.place {
 
 		local label = ui.computed(function(): string
 			tick:get()
-			-- An estimate is marked as one: `~`, as a terminal does.
+			-- A character-based estimate is always marked with `~`.
 			if W.live ~= nil then
 				return `~{math.floor(W.live + 0.5)} tok/s`
 			end
