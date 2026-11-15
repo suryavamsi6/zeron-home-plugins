@@ -71,7 +71,10 @@ local function reset(chat: string?)
 end
 
 -- The rate of pi's last finished reply. Reads only the file's end: a long
--- session's file is read from its tail, never whole.
+-- session's file is read from its tail, never whole. The lines are parsed
+-- here rather than piped through jq: a few hundred KB down a pipe is a lot
+-- to hand a promise, and one that stalls would keep the figure stale for
+-- good.
 local function read_rate()
 	if W.busy.rate or W.file == nil then
 		return
@@ -80,29 +83,29 @@ local function read_rate()
 	-- The last reply can sit well back from the end once tool results have
 	-- been written after it, so read a generous tail: it is still small.
 	zeron.run("tail", { "-n", "400", W.file }):after(function(t: any)
+		W.busy.rate = false
 		if t.status ~= 0 then
-			W.busy.rate = false
 			return
 		end
 		-- The last reply pi reported both numbers for.
-		local filter = '[inputs | fromjson? | select(.type == "message" and .message.role == "assistant")'
-			.. " | {o: (.message.usage.output // 0), d: (.message.durationMs // 0)}"
-			.. "] | map(select(.o > 0 and .d > 0)) | last"
-		zeron.run("jq", { "-R", "-n", filter }, { stdin = tostring(t.stdout) }):after(function(j: any)
-			W.busy.rate = false
-			local ok, v = pcall(function()
-				return ui.json.decode(trim(tostring(j.stdout)) or "null")
-			end)
-			if not ok or type(v) ~= "table" or type(v.o) ~= "number" or type(v.d) ~= "number" then
-				return
+		local found = nil
+		for line in string.gmatch(tostring(t.stdout), "[^\n]+") do
+			local out = string.match(line, '"usage":{[^}]-"output":%s*(%d+)')
+			local dur = string.match(line, '"durationMs":%s*(%d+)')
+			if out ~= nil and dur ~= nil then
+				local o, d = tonumber(out), tonumber(dur)
+				if o ~= nil and d ~= nil and o > 0 and d > 0 then
+					found = o / (d / 1000)
+				end
 			end
-			W.rate = v.o / (v.d / 1000)
-			-- pi's own figure for this reply replaces the estimate.
-			W.live = nil
-			show()
-		end, function()
-			W.busy.rate = false
-		end)
+		end
+		if found == nil then
+			return
+		end
+		W.rate = found
+		-- pi's own figure for this reply replaces the estimate.
+		W.live = nil
+		show()
 	end, function()
 		W.busy.rate = false
 	end)
