@@ -2,6 +2,8 @@
 
 Four signed plugins for Zeron:
 
+![The three plugins on a new chat: a greeting, a commit graph under the composer, and recent Zeron and GitHub activity](screenshot.png)
+
 | Plugin | What it shows |
 | --- | --- |
 | [Home activity](home-activity/) | Recent Zeron chats and GitHub account events, with links to each. |
