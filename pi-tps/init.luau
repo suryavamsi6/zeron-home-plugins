@@ -26,7 +26,11 @@ local POLL_MS = 2000 -- how often the exact figure is re-read
 local WINDOW_MS = 3000 -- the live figure covers this much of the stream
 local MIN_SPAN_MS = 700 -- less stream than this and there is no figure yet
 local STALE_MS = 1500 -- no new text for this long: the model isn't writing
-local CHARS_PER_TOKEN = 4 -- as pi's terminal counts them, while streaming
+local CHARS_PER_TOKEN = 4 -- characters per token, until this chat shows better
+local RATIO_SPAN = 8 -- replies to measure it over
+local MIN_RATIO = 1.5 -- a reply this thin says nothing about the next one
+local MAX_RATIO = 8
+local MIN_SAMPLES = 3 -- replies to see before the default is set aside
 local MAX_READ = 200000 -- a bigger jump than this is a new turn, not a burst
 local MAX_IDLE = 16 -- a quiet chat is read 1 tick in this many, at most
 
@@ -44,6 +48,12 @@ local W = {
 	samples = {} :: { { t: number, u: number } },
 	ticks = 0, -- ticks seen, to read a quiet journal less often
 	idle = 0, -- how many reads in a row found nothing
+	-- Characters written per token pi reported, one per finished reply, and
+	-- their median: what this chat's own replies actually run at.
+	ratios = {} :: { number },
+	ratio = CHARS_PER_TOKEN,
+	-- Characters written since the last usage line, for the next reading.
+	round = 0,
 	busy = { journal = false, rate = false, live = false },
 	-- Told when the figure changes, so the chip shows it at once. Set by the
 	-- place's build.
@@ -71,6 +81,9 @@ local function reset(chat: string?)
 	W.units = 0
 	W.samples = {}
 	W.idle = 0
+	W.ratios = {}
+	W.ratio = CHARS_PER_TOKEN
+	W.round = 0
 	show()
 end
 
@@ -167,8 +180,9 @@ end
 -- characters of reply inside ~86 bytes of line, and counting the line would
 -- overstate the rate about five times over.
 -- Only whole lines count: the last one may still be arriving.
-local function count(chunk: string): (number, number)
+local function count(chunk: string): (number, number, number?)
 	local units = 0
+	local tokens = nil
 	local start = 1
 	while true do
 		local nl = string.find(chunk, "\n", start, true)
@@ -183,9 +197,16 @@ local function count(chunk: string): (number, number)
 			if text ~= nil then
 				units += string.len(text)
 			end
+		else
+			-- A reply's own usage: the tokens pi counted for what was just
+			-- written, against the characters seen since the last one.
+			local out = tonumber(string.match(line, '"outputTokens":%s*(%d+)'))
+			if out ~= nil and out > 0 then
+				tokens = out
+			end
 		end
 	end
-	return units, start - 1
+	return units, start - 1, tokens
 end
 
 -- The live figure: characters read over the last few seconds, as tokens.
@@ -244,8 +265,33 @@ local function sample_live()
 			W.samples = {}
 			return
 		end
-		local units, used = count(body)
+		local units, used, tokens = count(body)
 		W.off += used
+		W.round += units
+		if tokens ~= nil then
+			-- What this reply wrote per token pi counted for it. Thinking the
+			-- journal never sees counts toward pi's tokens, so a chat that
+			-- thinks hard runs below four; measure rather than assume.
+			if W.round > 200 and tokens > 60 then
+				-- One reply is one reply: its own ratio is no median. Until a
+				-- few agree, four characters a token stands.
+				table.insert(W.ratios, W.round / tokens)
+				while #W.ratios > RATIO_SPAN do
+					table.remove(W.ratios, 1)
+				end
+				local sorted = {}
+				for i, v in ipairs(W.ratios) do
+					sorted[i] = v
+				end
+				table.sort(sorted)
+				local mid = math.floor((#sorted + 1) / 2)
+				if #sorted >= MIN_SAMPLES then
+					local median = if #sorted % 2 == 1 then sorted[mid] else (sorted[mid] + sorted[mid + 1]) / 2
+					W.ratio = math.clamp(median, MIN_RATIO, MAX_RATIO)
+				end
+			end
+			W.round = 0
+		end
 		if units == 0 then
 			W.idle = math.min(W.idle + 1, MAX_IDLE)
 			return
