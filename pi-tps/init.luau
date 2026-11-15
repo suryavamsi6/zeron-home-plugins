@@ -26,7 +26,6 @@ local POLL_MS = 2000 -- how often the exact figure is re-read
 local WINDOW_MS = 3000 -- the live figure covers this much of the stream
 local MIN_SPAN_MS = 700 -- less stream than this and there is no figure yet
 local STALE_MS = 1500 -- no new text for this long: the model isn't writing
-local CLEAR_MS = 4000 -- a live figure is kept this long after it stops
 local CHARS_PER_TOKEN = 4 -- as pi's terminal counts them, while streaming
 local MAX_READ = 200000 -- a bigger jump than this is a new turn, not a burst
 
@@ -78,7 +77,9 @@ local function read_rate()
 		return
 	end
 	W.busy.rate = true
-	zeron.run("tail", { "-n", "40", W.file }):after(function(t: any)
+	-- The last reply can sit well back from the end once tool results have
+	-- been written after it, so read a generous tail: it is still small.
+	zeron.run("tail", { "-n", "400", W.file }):after(function(t: any)
 		if t.status ~= 0 then
 			W.busy.rate = false
 			return
@@ -228,8 +229,10 @@ local function sample_live()
 		local units, used = count(body)
 		W.off += used
 		if units == 0 then
-			-- Nothing new: the model isn't writing.
-			if W.live ~= nil and ui.now() - W.liveAt > CLEAR_MS then
+			-- Nothing new: the model isn't writing. Withdraw the figure
+			-- rather than leave it frozen — and rebuild so it goes, since
+			-- nothing else would ask the label to look again.
+			if W.live ~= nil and ui.now() - W.liveAt > STALE_MS then
 				W.live = nil
 				show()
 			end
@@ -304,7 +307,7 @@ zeron.place {
 		local label = ui.computed(function(): string
 			tick:get()
 			-- An estimate is marked as one: `~`, as a terminal does.
-			if W.live ~= nil and ui.now() - W.liveAt < STALE_MS then
+			if W.live ~= nil then
 				return `~{math.floor(W.live + 0.5)} tok/s`
 			end
 			if W.rate == nil then
