@@ -22,6 +22,7 @@ Characters are not tokens, so it needs a ratio. It uses the same one pi's own te
 - Only a fragment's `text` is counted, never the JSON around it. A fragment is ~13 characters of reply inside ~86 bytes of line — counting the line would overstate the rate about five times.
 - Only whole lines count. The last line of a read may still be arriving, so it waits for the next one.
 - The live figure covers a 3-second window, and only appears once there's 0.7 s of stream to divide by. A window older than that is a pause, not a slow model, so no figure is shown.
+- Reading the journal costs a process, so a chat that has been quiet is read less and less often (at most one tick in sixteen). A turn starting, or text arriving, puts it back to every tick.
 - A live figure is marked `~` (an estimate, as a terminal marks one) and withdrawn after 1.5 s without new text rather than frozen at a stale number. It's cleared 4 s after the stream stops if pi's own figure hasn't replaced it.
 - `durationMs` runs from the request to the end of the response, so the exact figure includes time to first token. That's why it reads a little under the live one.
 

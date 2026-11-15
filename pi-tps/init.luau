@@ -28,6 +28,7 @@ local MIN_SPAN_MS = 700 -- less stream than this and there is no figure yet
 local STALE_MS = 1500 -- no new text for this long: the model isn't writing
 local CHARS_PER_TOKEN = 4 -- as pi's terminal counts them, while streaming
 local MAX_READ = 200000 -- a bigger jump than this is a new turn, not a burst
+local MAX_IDLE = 16 -- a quiet chat is read 1 tick in this many, at most
 
 -- What's been learned about the chat on screen, kept outside the build so a
 -- rebuild doesn't lose it.
@@ -41,6 +42,8 @@ local W = {
 	units = 0, -- characters of the reply read so far this turn
 	off = nil :: number?, -- the journal's next byte to read
 	samples = {} :: { { t: number, u: number } },
+	ticks = 0, -- ticks seen, to read a quiet journal less often
+	idle = 0, -- how many reads in a row found nothing
 	busy = { journal = false, rate = false, live = false },
 	-- Told when the figure changes, so the chip shows it at once. Set by the
 	-- place's build.
@@ -67,6 +70,7 @@ local function reset(chat: string?)
 	W.off = nil
 	W.units = 0
 	W.samples = {}
+	W.idle = 0
 	show()
 end
 
@@ -208,8 +212,21 @@ local function live_rate(now: number): number?
 end
 
 -- Reads what the journal gained since last time. The journal only grows
--- while the model writes, so an idle read finds nothing and costs nothing.
+-- while the model writes, so an idle read finds nothing — and reading
+-- costs a process, so a quiet chat is read less and less often until a
+-- turn starts, which is the only thing that can make it worth reading
+-- again.
 local function sample_live()
+	-- A figure that has stopped being fed is withdrawn, whether or not this
+	-- tick reads anything.
+	if W.live ~= nil and ui.now() - W.liveAt > STALE_MS then
+		W.live = nil
+		show()
+	end
+	W.ticks += 1
+	if W.ticks % (1 + W.idle) ~= 0 then
+		return
+	end
 	if W.busy.live or W.journal == nil or W.off == nil then
 		return
 	end
@@ -225,22 +242,15 @@ local function sample_live()
 			W.off += #body
 			W.units = 0
 			W.samples = {}
-			W.live = nil
-			show()
 			return
 		end
 		local units, used = count(body)
 		W.off += used
 		if units == 0 then
-			-- Nothing new: the model isn't writing. Withdraw the figure
-			-- rather than leave it frozen — and rebuild so it goes, since
-			-- nothing else would ask the label to look again.
-			if W.live ~= nil and ui.now() - W.liveAt > STALE_MS then
-				W.live = nil
-				show()
-			end
+			W.idle = math.min(W.idle + 1, MAX_IDLE)
 			return
 		end
+		W.idle = 0
 		W.units += units
 		local now = ui.now()
 		table.insert(W.samples, { t = now, u = W.units })
@@ -299,9 +309,14 @@ zeron.place {
 		-- A reply landing is the moment pi's own figure can be read.
 		zeron.on("turn.finished", refresh)
 		zeron.on("turn.errored", refresh)
+		-- A turn starting is the only thing that can make a quiet journal
+		-- worth reading again, so it wakes the sampler up.
+		zeron.on("turn.started", function()
+			W.idle = 0
+		end)
 
-		-- The journal, often: it grows only while the model writes, so this
-		-- is the live figure and nothing else.
+		-- The journal, often while it's growing: this is the live figure and
+		-- nothing else.
 		ui.every(LIVE_MS, sample_live)
 		-- The exact figure now and then, for a chat switched to or a reply
 		-- already on disk.
