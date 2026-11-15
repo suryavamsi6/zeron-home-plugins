@@ -1,7 +1,7 @@
 {
   "id": "pi-tps",
   "name": "Pi tokens per second",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "entry": "init.luau",
   "permissions": [
     "ui.add",

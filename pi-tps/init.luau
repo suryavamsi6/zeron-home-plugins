@@ -8,10 +8,9 @@
 -- Live, from the chat's journal
 --   ~/.zeron/orgs/*/user_*/journals/<chat>.jsonl
 -- which Zeron fills as pi streams — every reasoning and text fragment is a
--- line there. The chip reads only what was added since the turn began and
--- turns those characters into tokens with a ratio it measures from the
--- journal itself (characters written per token pi reported), so the estimate
--- keeps pace with whichever model is in use.
+-- line there. The chip reads only what was added since it last looked and
+-- turns those characters into tokens the way pi's own terminal does (four
+-- characters to a token), so the two figures agree while it writes.
 --
 -- Exact, from pi's session file for this chat
 --   ~/.pi/agent/sessions/**/<day>_<session>.jsonl
@@ -22,13 +21,14 @@
 
 local zeron = require("./zeron")("pi-tps")
 
-local LIVE_MS = 300 -- how often the journal is looked at while pi writes
-local POLL_MS = 2000 -- how often the exact figure is re-read when idle
+local LIVE_MS = 300 -- how often the journal is read
+local POLL_MS = 2000 -- how often the exact figure is re-read
 local WINDOW_MS = 3000 -- the live figure covers this much of the stream
 local MIN_SPAN_MS = 700 -- less stream than this and there is no figure yet
 local STALE_MS = 1500 -- no new text for this long: the model isn't writing
-local CLEAR_MS = 6000 -- a live figure kept this long after its reply ends
-local DEFAULT_RATIO = 3.5 -- characters per token, until one is measured
+local CLEAR_MS = 4000 -- a live figure is kept this long after it stops
+local CHARS_PER_TOKEN = 4 -- as pi's terminal counts them, while streaming
+local MAX_READ = 200000 -- a bigger jump than this is a new turn, not a burst
 
 -- What's been learned about the chat on screen, kept outside the build so a
 -- rebuild doesn't lose it.
@@ -39,13 +39,9 @@ local W = {
 	rate = nil :: number?, -- pi's own figure for the last finished reply
 	live = nil :: number?, -- the estimate while it writes
 	liveAt = 0,
-	ratio = DEFAULT_RATIO,
-	units = 0, -- characters of this turn's reply read so far
-	round = 0, -- of those, the ones since the last usage line
+	units = 0, -- characters of the reply read so far this turn
 	off = nil :: number?, -- the journal's next byte to read
 	samples = {} :: { { t: number, u: number } },
-	streaming = false,
-	gen = 0,
 	busy = { journal = false, rate = false, live = false },
 	-- Told when the figure changes, so the chip shows it at once. Set by the
 	-- place's build.
@@ -58,40 +54,44 @@ local function show()
 	end
 end
 
+local function trim(s: string): string?
+	local t = string.gsub(string.gsub(s, "^%s+", ""), "%s+$", "")
+	return if t == "" then nil else t
+end
+
 local function reset(chat: string?)
 	W.chat = chat
 	W.journal = nil
 	W.file = nil
 	W.rate = nil
 	W.live = nil
-	W.streaming = false
 	W.off = nil
 	W.units = 0
-	W.round = 0
 	W.samples = {}
 	show()
 end
 
-local function trim(s: string): string?
-	local t = string.gsub(string.gsub(s, "^%s+", ""), "%s+$", "")
-	return if t == "" then nil else t
-end
-
 -- The rate of pi's last finished reply. Reads only the file's end: a long
--- chat's session file is megabytes.
+-- session's file is read from its tail, never whole.
 local function read_rate()
 	if W.busy.rate or W.file == nil then
 		return
 	end
 	W.busy.rate = true
-	local filter = '[inputs | fromjson? | select(.type == "message" and .message.role == "assistant") | {o: (.message.usage.output // 0), d: (.message.durationMs // 0)} | select(.o > 0 and .d > 0)] | last'
 	zeron.run("tail", { "-n", "40", W.file }):after(function(t: any)
+		if t.status ~= 0 then
+			W.busy.rate = false
+			return
+		end
+		-- The last reply pi reported both numbers for.
+		local filter = '[inputs | fromjson? | select(.type == "message" and .message.role == "assistant")'
+			.. " | {o: (.message.usage.output // 0), d: (.message.durationMs // 0)}"
+			.. "] | map(select(.o > 0 and .d > 0)) | last"
 		zeron.run("jq", { "-R", "-n", filter }, { stdin = tostring(t.stdout) }):after(function(j: any)
 			W.busy.rate = false
-			if j.status ~= 0 then
-				return
-			end
-			local ok, v = pcall(ui.json.decode, tostring(j.stdout))
+			local ok, v = pcall(function()
+				return ui.json.decode(trim(tostring(j.stdout)) or "null")
+			end)
 			if not ok or type(v) ~= "table" or type(v.o) ~= "number" or type(v.d) ~= "number" then
 				return
 			end
@@ -107,11 +107,7 @@ local function read_rate()
 	end)
 end
 
--- Declared here so the session lookup below can start a watch that was
--- waiting on it.
-local begin_live: () -> ()
-
--- This chat's journal, then the pi session it names (and whether it's pi's
+-- This chat's journal, then the pi session it names (and whether it's pi's).
 local function find_session(chat: string)
 	if W.busy.journal then
 		return
@@ -136,11 +132,15 @@ local function find_session(chat: string)
 				W.busy.journal = false
 				W.journal = path
 				W.file = if f.status == 0 then trim(tostring(f.stdout)) else nil
-				-- A turn may have begun while this was being looked up; the
-				-- watch can start now.
-				if W.streaming and W.off == nil then
-					begin_live()
-				end
+				-- Start reading from where the journal stands: what's there
+				-- already is finished business.
+				zeron.run("find", { path, "-printf", "%s" }):after(function(s: any)
+					local size = tonumber(string.match(tostring(s.stdout), "^%s*(%d+)"))
+					if size ~= nil then
+						W.off = size + 1
+					end
+				end)
+				read_rate()
 			end, function()
 				W.busy.journal = false
 			end)
@@ -153,16 +153,14 @@ local function find_session(chat: string)
 end
 
 -- How much new reply a chunk of the journal holds, in characters of the
--- reply itself, and a fresh reading of characters per token when the
--- chunk carries a reply's usage.
+-- reply itself.
 --
 -- Only a fragment's `text` counts, never its JSON: a fragment is ~13
--- characters of reply inside ~86 bytes of line, and counting the line
--- would overstate the rate about five times over.
+-- characters of reply inside ~86 bytes of line, and counting the line would
+-- overstate the rate about five times over.
 -- Only whole lines count: the last one may still be arriving.
-local function count(chunk: string): (number, number?, number)
+local function count(chunk: string): (number, number)
 	local units = 0
-	local sample = nil
 	local start = 1
 	while true do
 		local nl = string.find(chunk, "\n", start, true)
@@ -177,18 +175,9 @@ local function count(chunk: string): (number, number?, number)
 			if text ~= nil then
 				units += string.len(text)
 			end
-		else
-			local out = tonumber(string.match(line, '"outputTokens":%s*(%d+)'))
-			if out ~= nil then
-				-- Measured against what pi reported for the same reply.
-				if W.round > 200 and out > 60 then
-					sample = W.round / out
-				end
-				W.round = 0
-			end
 		end
 	end
-	return units, sample, start - 1
+	return units, start - 1
 end
 
 -- The live figure: characters read over the last few seconds, as tokens.
@@ -199,41 +188,23 @@ local function live_rate(now: number): number?
 		return nil
 	end
 	local span = last.t - first.t
-	if span < MIN_SPAN_MS then
+	-- Samples older than the window are a pause, not a slow model.
+	if span < MIN_SPAN_MS or span > WINDOW_MS * 1.5 then
 		return nil
 	end
 	local grew = last.u - first.u
 	if grew <= 0 then
 		return nil
 	end
-	local rate = (grew / (span / 1000)) / W.ratio
+	local rate = (grew / (span / 1000)) / CHARS_PER_TOKEN
 	if rate <= 0 or rate > 2000 then
 		return nil
 	end
 	return rate
 end
 
--- A turn began: watch the journal from where it stands now.
-function begin_live()
-	W.gen += 1
-	W.streaming = true
-	W.units = 0
-	W.round = 0
-	W.samples = {}
-	W.off = nil
-	if W.journal == nil then
-		return
-	end
-	-- `find` reports the file's size; the watch starts past what's there.
-	zeron.run("find", { W.journal, "-printf", "%s" }):after(function(r: any)
-		local size = tonumber(string.match(tostring(r.stdout), "^%s*(%d+)"))
-		if size ~= nil and W.streaming then
-			W.off = size + 1
-		end
-	end)
-end
-
--- Reads what the journal gained since last time.
+-- Reads what the journal gained since last time. The journal only grows
+-- while the model writes, so an idle read finds nothing and costs nothing.
 local function sample_live()
 	if W.busy.live or W.journal == nil or W.off == nil then
 		return
@@ -244,19 +215,30 @@ local function sample_live()
 		if t.status ~= 0 then
 			return
 		end
-		local units, sample, used = count(tostring(t.stdout))
-		W.off += used
-		W.units += units
-		W.round += units
-		if sample ~= nil then
-			W.ratio = math.clamp(sample, 2, 8)
-		end
-		if units == 0 then
+		local body = tostring(t.stdout)
+		if #body > MAX_READ then
+			-- A new turn's worth, not a burst: start counting from here.
+			W.off += #body
+			W.units = 0
+			W.samples = {}
+			W.live = nil
+			show()
 			return
 		end
+		local units, used = count(body)
+		W.off += used
+		if units == 0 then
+			-- Nothing new: the model isn't writing.
+			if W.live ~= nil and ui.now() - W.liveAt > CLEAR_MS then
+				W.live = nil
+				show()
+			end
+			return
+		end
+		W.units += units
 		local now = ui.now()
 		table.insert(W.samples, { t = now, u = W.units })
-		while #W.samples > 2 and W.samples[2].t <= now - WINDOW_MS do
+		while #W.samples > 1 and W.samples[1].t <= now - WINDOW_MS do
 			table.remove(W.samples, 1)
 		end
 		local rate = live_rate(now)
@@ -267,20 +249,6 @@ local function sample_live()
 		end
 	end, function()
 		W.busy.live = false
-	end)
-end
-
--- It ended. The estimate stays a moment, until pi's own figure for the
--- reply lands.
-local function end_live()
-	W.streaming = false
-	W.off = nil
-	local gen = W.gen
-	ui.after(CLEAR_MS, function()
-		if W.gen == gen and not W.streaming and W.live ~= nil then
-			W.live = nil
-			show()
-		end
 	end)
 end
 
@@ -308,8 +276,11 @@ zeron.place {
 			if W.chat ~= id then
 				reset(id)
 			end
-			if W.file == nil then
+			if W.journal == nil then
 				find_session(id)
+				return
+			end
+			if W.file == nil then
 				return
 			end
 			read_rate()
@@ -319,38 +290,21 @@ zeron.place {
 			tick:set(tick:peek() + 1)
 		end
 
-		-- A turn beginning is the moment there's something to watch, and its
-		-- end the moment pi's own figure can be read.
-		zeron.on("turn.started", function()
-			refresh()
-			begin_live()
-		end)
-		zeron.on("turn.finished", function()
-			end_live()
-			refresh()
-		end)
-		zeron.on("turn.errored", function()
-			end_live()
-			refresh()
-		end)
+		-- A reply landing is the moment pi's own figure can be read.
+		zeron.on("turn.finished", refresh)
+		zeron.on("turn.errored", refresh)
 
-		-- While a turn runs: the journal, often. Otherwise: the exact figure
-		-- now and then, for a chat switched to or a reply already on disk.
-		ui.every(LIVE_MS, function()
-			if not W.streaming then
-				return
-			end
-			if W.live ~= nil and ui.now() - W.liveAt > STALE_MS then
-				W.live = nil
-				show()
-			end
-			sample_live()
-		end)
+		-- The journal, often: it grows only while the model writes, so this
+		-- is the live figure and nothing else.
+		ui.every(LIVE_MS, sample_live)
+		-- The exact figure now and then, for a chat switched to or a reply
+		-- already on disk.
 		ui.every(POLL_MS, refresh)
 
 		local label = ui.computed(function(): string
 			tick:get()
-			if W.live ~= nil then
+			-- An estimate is marked as one: `~`, as a terminal does.
+			if W.live ~= nil and ui.now() - W.liveAt < STALE_MS then
 				return `~{math.floor(W.live + 0.5)} tok/s`
 			end
 			if W.rate == nil then

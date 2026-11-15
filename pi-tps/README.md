@@ -11,9 +11,9 @@ It counts up live while pi writes — `~62 tok/s` — and when the reply lands i
 | `~/.zeron/orgs/*/user_*/journals/<chat>.jsonl` | every fragment as pi writes it, and the session this chat runs in |
 | `~/.pi/agent/sessions/**/<day>_<session>.jsonl` | each finished reply: `usage.output` and `durationMs` |
 
-**Live.** Zeron fills the chat's journal as pi streams: each reasoning and text fragment is one line. The chip reads what the journal gained since the turn began and divides it by the time it took.
+**Live.** Zeron fills the chat's journal as pi streams: each reasoning and text fragment is one line. The chip reads what the journal gained since it last looked, and divides it by the time it took. The journal only grows while the model writes, so an idle read finds nothing and costs nothing — no turn events to miss, nothing to poll while it's quiet.
 
-Characters are not tokens, so it needs a ratio — and it measures its own rather than assuming one. Every reply ends with a `usage` line carrying the output tokens pi counted for it; the characters read since the last such line, over those tokens, is what the model really writes per token. That ratio carries into the next reply, so it stays right across models.
+Characters are not tokens, so it needs a ratio. It uses the same one pi's own terminal does — four characters to a token — so the two figures agree while a reply is being written.
 
 **Exact.** When the reply finishes, pi's session file has the reply's `usage.output` and `durationMs`. The journal's `sessionStarted` names the session and the harness running it; for a pi chat that id finds the session file, and its last reply is the number the chip settles on. A chat run by another harness has no pi session, so the chip stays empty there.
 
@@ -21,8 +21,8 @@ Characters are not tokens, so it needs a ratio — and it measures its own rathe
 
 - Only a fragment's `text` is counted, never the JSON around it. A fragment is ~13 characters of reply inside ~86 bytes of line — counting the line would overstate the rate about five times.
 - Only whole lines count. The last line of a read may still be arriving, so it waits for the next one.
-- The live figure covers a 3-second window, and only appears once there's 0.7 s of stream to divide by.
-- No new text for 1.5 s means the model has stopped writing, so the live figure is withdrawn rather than frozen. It's cleared 6 s after a reply ends if pi's own figure hasn't replaced it.
+- The live figure covers a 3-second window, and only appears once there's 0.7 s of stream to divide by. A window older than that is a pause, not a slow model, so no figure is shown.
+- A live figure is marked `~` (an estimate, as a terminal marks one) and withdrawn after 1.5 s without new text rather than frozen at a stale number. It's cleared 4 s after the stream stops if pi's own figure hasn't replaced it.
 - `durationMs` runs from the request to the end of the response, so the exact figure includes time to first token. That's why it reads a little under the live one.
 
 ## Permissions
